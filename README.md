@@ -152,3 +152,4 @@ touch controls, pause/resume, edits, completed chapter revisits, reduced motion,
 and WebGL failure / context loss. Desktop and mobile screenshots plus
 `results.json` are saved under `.wrangler/browser-qa/`.
 # bakery_shop
+# bakery_shop
