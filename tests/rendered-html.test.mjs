@@ -31,9 +31,15 @@ test("server-renders the Maison Miette experience", async () => {
   assert.match(html, /<title>Maison Miette — Pâtisserie &amp; Boulangerie<\/title>/i);
   assert.match(html, /Every crumb/);
   assert.match(html, /Enter the bakery/);
-  assert.match(html, /Today(?:&apos;|&#x27;|')s small/);
+  assert.match(html, /The counter/);
+  assert.match(html, /The kitchen/);
+  assert.match(html, /The golden rise/);
+  assert.match(html, /The final flourish/);
+  assert.match(html, /Made for you/);
   assert.match(html, /Our promise/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/i);
+  assert.equal((html.match(/class="world-host"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /cake-crop|pastry-3d-canvas/);
 });
 
 test("includes accessible navigation and social metadata", async () => {

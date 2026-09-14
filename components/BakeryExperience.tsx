@@ -1,360 +1,169 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { cakes, chapters, chapterDurations, chooseCake, frostingLabels, initialOrder, money, orderPrice, processLabel, toppingLabels, type CakeKind, type CakeOrder, type Frosting, type Topping } from "./bakery-order";
+import type { BakeryWorld } from "./bakery-world";
 
-const clamp = (value: number) => Math.min(1, Math.max(0, value));
-
-function span(progress: number, start: number, end: number) {
-  return clamp((progress - start) / (end - start));
-}
-
-function windowed(progress: number, start: number, peakIn: number, peakOut: number, end: number) {
-  return Math.min(span(progress, start, peakIn), 1 - span(progress, peakOut, end));
-}
-
-type WebAudioContext = AudioContext & { webkitAudioContext?: typeof AudioContext };
+const narrative = [
+  { eyebrow: "17 Rue des Lilas · Since 1987", title: <>Every crumb<br />{" "}tells a <em>story.</em></>, copy: "A quiet street. A golden window. And the beginning of something delicious." },
+  { eyebrow: "Chapter 02 · A warm welcome", title: <>Make yourself<br />{" "}<em>at home.</em></>, copy: "The bell rings. Butter fills the air. Behind the counter, Émile is already making a little magic." },
+  { eyebrow: "Chapter 03 · Today’s small temptations", title: <>Love at<br />{" "}<em>first layer.</em></>, copy: "Three signature cakes, made by hand. Choose the one that catches your eye." },
+  { eyebrow: "Chapter 04 · A cake with your name on it", title: <>A little more<br />{" "}<em>you.</em></>, copy: "Choose your layers, your finish, your little flourish. We’ll make it just for you." },
+  { eyebrow: "Chapter 05 · Behind the counter", title: <>Good things<br />{" "}start <em>simply.</em></>, copy: "Stone-milled flour. Fresh eggs. Cultured butter. Émile follows your order into the kitchen." },
+  { eyebrow: "Chapter 06 · Patience, made golden", title: <>A little heat.<br />{" "}<em>A little wonder.</em></>, copy: "Silky batter meets the copper oven. Watch your cake rise, then rest on the cooling rack." },
+  { eyebrow: "Chapter 07 · The finishing touch", title: <>The art is<br />{" "}in the <em>details.</em></>, copy: "Your chosen frosting. Little clouds of cream. Each finishing touch, placed by hand." },
+  { eyebrow: "Chapter 08 · From our hands to yours", title: <>Made with love.<br />{" "}<em>Made for you.</em></>, copy: "A cream box, a raspberry ribbon, and a little piece of Maison Miette to take home." },
+];
 
 export function BakeryExperience() {
-  const storyRef = useRef<HTMLElement>(null);
-  const audioRef = useRef<AudioContext | null>(null);
-  const lastSoundRef = useRef(0);
-  const frameRef = useRef<number | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [entered, setEntered] = useState(false);
-  const [soundOn, setSoundOn] = useState(true);
+  const host = useRef<HTMLDivElement>(null);
+  const world = useRef<BakeryWorld | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const audio = useRef<AudioContext | null>(null);
   const [stage, setStage] = useState(0);
+  const [visited, setVisited] = useState(0);
+  const [order, setOrder] = useState<CakeOrder>(initialOrder);
+  const [progress, setProgress] = useState<Record<number, number>>({});
+  const [loading, setLoading] = useState(5);
+  const [fallback, setFallback] = useState(false);
+  const [sound, setSound] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [summary, setSummary] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const currentProgress = progress[stage] ?? 0;
+  const cake = cakes[order.cake];
+  const price = orderPrice(order);
+  const busy = stage >= 4 && currentProgress < 1;
 
-  const makeAudio = useCallback(() => {
-    if (audioRef.current) return audioRef.current;
-    const AudioConstructor = window.AudioContext ||
-      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioConstructor) return null;
-    const context = new AudioConstructor() as WebAudioContext;
-    audioRef.current = context;
-    return context;
+  const chime = useCallback((chapter: number) => {
+    if (!audio.current) return;
+    const context = audio.current;
+    void context.resume().then(() => {
+      [chapter === 1 ? 880 : 523.25, 1046.5, 1318.5].forEach((frequency, i) => {
+        const tone = context.createOscillator();
+        const volume = context.createGain();
+        tone.frequency.value = frequency;
+        tone.type = "sine";
+        volume.gain.setValueAtTime(.0001, context.currentTime);
+        volume.gain.exponentialRampToValueAtTime(.035 / (i + 1), context.currentTime + .025);
+        volume.gain.exponentialRampToValueAtTime(.0001, context.currentTime + 1.3);
+        tone.connect(volume).connect(context.destination);
+        tone.start(); tone.stop(context.currentTime + 1.4);
+      });
+    }).catch(() => {});
   }, []);
 
-  const playBell = useCallback((context: AudioContext, delay = 0) => {
-    [740, 1110, 1480].forEach((frequency, index) => {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = index === 0 ? "sine" : "triangle";
-      oscillator.frequency.value = frequency;
-      gain.gain.setValueAtTime(0.0001, context.currentTime + delay);
-      gain.gain.exponentialRampToValueAtTime(0.045 / (index + 1), context.currentTime + delay + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + delay + 1.8);
-      oscillator.connect(gain).connect(context.destination);
-      oscillator.start(context.currentTime + delay);
-      oscillator.stop(context.currentTime + delay + 1.9);
-    });
+  const go = useCallback((next: number) => {
+    setStage(next); setVisited(old => Math.max(old, next)); setPaused(false);
+    if (sound) chime(next);
+  }, [chime, sound]);
+
+  const selectCake = useCallback((kind: CakeKind) => {
+    setOrder(old => chooseCake(old, kind));
+    setSubmitted(false); setConfirmed(false); setProgress({});
+    setVisited(old => Math.min(old, 3));
   }, []);
 
-  const playDoor = useCallback((context: AudioContext) => {
-    const duration = 1.35;
-    const buffer = context.createBuffer(1, context.sampleRate * duration, context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let index = 0; index < data.length; index += 1) {
-      data[index] = (Math.random() * 2 - 1) * (1 - index / data.length);
-    }
-    const source = context.createBufferSource();
-    const filter = context.createBiquadFilter();
-    const gain = context.createGain();
-    source.buffer = buffer;
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(160, context.currentTime);
-    filter.frequency.exponentialRampToValueAtTime(620, context.currentTime + duration);
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.14, context.currentTime + 0.18);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + duration);
-    source.connect(filter).connect(gain).connect(context.destination);
-    source.start();
-    playBell(context, 0.72);
-  }, [playBell]);
+  useEffect(() => {
+    let disposed = false;
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onMotion = () => setReducedMotion(motion.matches);
+    onMotion(); motion.addEventListener("change", onMotion);
+    import("./bakery-world").then(({ createBakeryWorld }) => {
+      if (disposed || !host.current) return;
+      setLoading(35);
+      world.current = createBakeryWorld(host.current, {
+        onReady: () => { if (!disposed) setLoading(100); },
+        onFailure: () => { if (!disposed) { setFallback(true); setLoading(100); } },
+        onSelect: selectCake,
+      });
+    }).catch(() => { if (!disposed) { setFallback(true); setLoading(100); } });
+    return () => { disposed = true; world.current?.dispose(); world.current = null; motion.removeEventListener("change", onMotion); };
+  }, [selectCake]);
 
-  const playOven = useCallback((context: AudioContext) => {
-    const duration = 0.85;
-    const buffer = context.createBuffer(1, context.sampleRate * duration, context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let index = 0; index < data.length; index += 1) {
-      const pop = Math.random() > 0.986 ? Math.random() * 0.9 : 0;
-      data[index] = (Math.random() * 2 - 1) * 0.05 + pop;
-    }
-    const source = context.createBufferSource();
-    const filter = context.createBiquadFilter();
-    const gain = context.createGain();
-    source.buffer = buffer;
-    filter.type = "bandpass";
-    filter.frequency.value = 920;
-    filter.Q.value = 0.7;
-    gain.gain.setValueAtTime(0.12, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + duration);
-    source.connect(filter).connect(gain).connect(context.destination);
-    source.start();
-  }, []);
+  useEffect(() => { world.current?.update({ stage, progress: currentProgress, order, reducedMotion, paused }); }, [stage, currentProgress, order, reducedMotion, paused, loading]);
+  useEffect(() => { if (stage > 0) heading.current?.focus({ preventScroll: true }); }, [stage]);
+  useEffect(() => () => { void audio.current?.close(); }, []);
 
-  const enterBakery = useCallback(async () => {
-    setEntered(true);
-    if (!soundOn) return;
-    const context = makeAudio();
-    if (!context) return;
-    await context.resume();
-    playDoor(context);
-    lastSoundRef.current = 1;
-  }, [makeAudio, playDoor, soundOn]);
+  useEffect(() => {
+    if (stage < 4 || paused || loading < 100) return;
+    let previous = performance.now();
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const delta = Math.min((now - previous) / 1000, .3);
+      previous = now;
+      if (document.hidden) return;
+      setProgress(old => {
+        const value = old[stage] ?? 0;
+        return value >= 1 ? old : { ...old, [stage]: Math.min(1, value + delta / chapterDurations[stage]) };
+      });
+    }, 100);
+    return () => clearInterval(timer);
+  }, [stage, paused, loading]);
 
-  const toggleSound = useCallback(async () => {
-    const next = !soundOn;
-    setSoundOn(next);
+  useEffect(() => {
+    if (stage < 4 || stage > 6 || currentProgress < 1 || paused) return;
+    const timer = setTimeout(() => go(stage + 1), 1600);
+    return () => clearTimeout(timer);
+  }, [stage, currentProgress, paused, go]);
+
+  function customize(next: Partial<CakeOrder>) {
+    setOrder(old => ({ ...old, ...next }));
+    setSubmitted(false); setConfirmed(false); setProgress({}); setVisited(3);
+  }
+  function placeOrder() { setSubmitted(true); setConfirmed(false); setProgress({}); go(4); }
+  function skip() {
+    setProgress(old => ({ ...old, [stage]: 1 }));
+    if (stage < 7) go(stage + 1);
+  }
+  function restart() {
+    setOrder(initialOrder); setSubmitted(false); setConfirmed(false); setProgress({}); setVisited(0); setSummary(false); go(0);
+  }
+  function toggleSound() {
+    const next = !sound;
+    setSound(next);
     if (next) {
-      const context = makeAudio();
-      if (context) {
-        await context.resume();
-        playBell(context, 0);
-      }
-    }
-  }, [makeAudio, playBell, soundOn]);
-
-  useEffect(() => {
-    const update = () => {
-      frameRef.current = null;
-      const element = storyRef.current;
-      if (!element) return;
-      const rect = element.getBoundingClientRect();
-      const distance = Math.max(1, element.offsetHeight - window.innerHeight);
-      const next = clamp(-rect.top / distance);
-      setProgress(next);
-
-      const nextStage = next < 0.17 ? 0 : next < 0.39 ? 1 : next < 0.63 ? 2 : next < 0.86 ? 3 : 4;
-      setStage((current) => (current === nextStage ? current : nextStage));
-    };
-
-    const onScroll = () => {
-      if (frameRef.current === null) frameRef.current = requestAnimationFrame(update);
-    };
-
-    update();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll);
-    return () => {
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!entered || !soundOn || stage <= lastSoundRef.current) return;
-    const context = audioRef.current;
-    if (!context) return;
-    if (stage === 1) playBell(context, 0);
-    if (stage === 3) playOven(context);
-    lastSoundRef.current = stage;
-  }, [entered, playBell, playOven, soundOn, stage]);
-
-  useEffect(() => {
-    return () => {
-      audioRef.current?.close();
-    };
-  }, []);
-
-  const introOpen = entered ? 0.34 : 0;
-  const doorOpen = Math.max(introOpen, span(progress, 0.015, 0.17));
-  const entranceOpacity = 1 - span(progress, 0.08, 0.2);
-  const cakeOpacity = windowed(progress, 0.12, 0.21, 0.34, 0.44);
-  const kitchenOpacity = windowed(progress, 0.36, 0.45, 0.57, 0.67);
-  const ovenOpacity = windowed(progress, 0.59, 0.68, 0.81, 0.9);
-  const finaleOpacity = span(progress, 0.84, 0.97);
-  const ovenBake = span(progress, 0.65, 0.84);
+      const Constructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Constructor) { setSound(false); return; }
+      audio.current ??= new Constructor(); chime(stage);
+    } else void audio.current?.suspend();
+  }
 
   return (
-    <main className="site-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="Maison Miette, back to entrance">
-          <span className="brand-mark">M</span>
-          <span>
-            <strong>Maison Miette</strong>
-            <small>Pâtisserie · Boulangerie</small>
-          </span>
-        </a>
-        <div className="topbar-actions">
-          <a href="#menu" className="nav-order">Today&apos;s bakes</a>
-          <button className="sound-toggle" onClick={toggleSound} aria-pressed={soundOn} type="button">
-            <span className={`sound-icon ${soundOn ? "is-on" : ""}`} aria-hidden="true">
-              <i />
-              <i />
-              <i />
-            </span>
-            {soundOn ? "Sound on" : "Sound off"}
-          </button>
-        </div>
+    <main className={`journey-shell chapter-${stage}`} id="top">
+      <a className="skip-link" href="#journey-controls">Skip to story controls</a>
+      <div className="world-host" ref={host} aria-hidden="true" />
+      <div className="world-wash" aria-hidden="true" />
+      {loading < 100 && <div className="world-loading" role="status"><span className="loading-monogram">M</span><span>Warming up the bakery</span><progress value={loading} max={100} /><small>Setting the table for your story.</small></div>}
+      {fallback && <div className="world-fallback"><span className="fallback-monogram" aria-hidden="true">M</span><p>The kitchen view is resting.<br />{" "}You can still create your cake and follow every step below.</p><button type="button" onClick={() => window.location.reload()}>Try the 3D experience again</button></div>}
+
+      <header className="journey-header">
+        <a className="journey-brand" href="#top" onClick={event => { event.preventDefault(); go(0); }} aria-label="Maison Miette, back to entrance"><span className="brand-seal">M<span>·</span></span><span><strong>Maison Miette</strong><small>PÂTISSERIE & BOULANGERIE</small></span></a>
+        <div className="header-center"><span className="live-dot" /> A little Paris, a little closer.</div>
+        <div className="header-tools"><button type="button" className="sound-button" aria-pressed={sound} aria-label={sound ? "Mute bakery sound" : "Enable bakery sound"} onClick={toggleSound}><span aria-hidden="true">{sound ? "♫" : "♩"}</span><span>Sound {sound ? "on" : "off"}</span></button><button type="button" className="order-button" aria-expanded={summary} aria-controls="order-summary" onClick={() => setSummary(!summary)}><span aria-hidden="true">♧</span> Your cake <span className="order-count">{submitted ? "1" : "0"}</span></button></div>
       </header>
 
-      <aside className="chapter-rail" aria-label="Story progress">
-        <span className="chapter-line"><i style={{ height: `${progress * 100}%` }} /></span>
-        {["Enter", "Taste", "Kitchen", "Oven", "Welcome"].map((label, index) => (
-          <span className={stage >= index ? "active" : ""} key={label}>
-            <b>{String(index + 1).padStart(2, "0")}</b>{label}
-          </span>
-        ))}
-      </aside>
+      <div className="location-tag"><span aria-hidden="true">⌖</span> {stage === 0 ? "Outside the maison" : stage < 4 || stage === 7 ? "Inside the maison" : "Émile’s open kitchen"}<span className="location-rule" /><span>07:30 AM</span></div>
+      <section className="story-panel" id="journey-controls" aria-label={chapters[stage]}>
+        <p className="chapter-eyebrow"><span className="chapter-index">{String(stage + 1).padStart(2, "0")}</span>{narrative[stage].eyebrow}</p>
+        <h1 tabIndex={-1} ref={heading}>{confirmed && stage === 7 ? <>A sweet ending.<br />{" "}<em>Until next time.</em></> : narrative[stage].title}</h1>
+        <p className="story-copy">{confirmed && stage === 7 ? "Your demo order is complete. No payment was taken. Émile will keep a little room for you at the counter." : narrative[stage].copy}</p>
 
-      <section className="scroll-story" id="top" ref={storyRef} aria-label="The Maison Miette story">
-        <div className="story-stage">
-          <div
-            className="bakery-world"
-            aria-hidden="true"
-            style={{
-              transform: `scale(${1.02 + progress * 0.48}) translate3d(${progress * -3}%, ${progress * 1.5}%, 0)`,
-              filter: `saturate(${0.84 + progress * 0.28}) brightness(${0.72 + progress * 0.13})`,
-            }}
-          />
-          <div className="world-vignette" aria-hidden="true" />
-          <div className="film-grain" aria-hidden="true" />
-
-          <div className="entrance-copy scene" style={{ opacity: entranceOpacity }}>
-            <p className="eyebrow"><span /> 17 Rue des Lilas · Since 1987 <span /></p>
-            <h1>Every crumb<br /><em>tells a story.</em></h1>
-            <p className="lede">Come in before the city wakes. The butter is folding,<br className="desktop-only" /> the copper is warming, and something beautiful is rising.</p>
-            <button className={`enter-button ${entered ? "entered" : ""}`} type="button" onClick={enterBakery}>
-              <span>{entered ? "The doors are open" : "Enter the bakery"}</span>
-              <i aria-hidden="true">↘</i>
-            </button>
-            <small className="sound-note">Best experienced with sound</small>
-          </div>
-
-          <div
-            className="door door-left"
-            aria-hidden="true"
-            style={{ transform: `perspective(1500px) translateX(${-doorOpen * 94}%) rotateY(${doorOpen * 24}deg)` }}
-          >
-            <div className="door-panel top" /><div className="door-panel middle" /><div className="door-panel bottom" />
-            <span className="door-knob" />
-          </div>
-          <div
-            className="door door-right"
-            aria-hidden="true"
-            style={{ transform: `perspective(1500px) translateX(${doorOpen * 94}%) rotateY(${-doorOpen * 24}deg)` }}
-          >
-            <div className="door-panel top" /><div className="door-panel middle" /><div className="door-panel bottom" />
-            <span className="door-knob" />
-          </div>
-
-          <section className="cake-scene scene" style={{ opacity: cakeOpacity, pointerEvents: cakeOpacity > 0.6 ? "auto" : "none" }} aria-label="Our signature cakes">
-            <div className="scene-heading left-heading">
-              <p className="eyebrow">Act II · The counter</p>
-              <h2>Little works<br />of <em>edible art.</em></h2>
-              <p>Built by hand, finished by instinct, and made to disappear.</p>
-            </div>
-            <div className="cake-orbit" style={{ transform: `translate3d(0, ${(0.5 - span(progress, 0.13, 0.39)) * 80}px, 0)` }}>
-              <article className="cake-medallion cake-one">
-                <div className="cake-crop" />
-                <span><b>01</b> Raspberry Opera</span>
-              </article>
-              <article className="cake-medallion cake-two">
-                <div className="cake-crop" />
-                <span><b>02</b> Pistachio Cloud</span>
-              </article>
-              <article className="cake-medallion cake-three">
-                <div className="cake-crop" />
-                <span><b>03</b> Dark Cacao No. 7</span>
-              </article>
-            </div>
-          </section>
-
-          <section className="kitchen-scene scene" style={{ opacity: kitchenOpacity }} aria-label="Inside the kitchen">
-            <div className="kitchen-frame" aria-hidden="true">
-              <span className="flour flour-one" /><span className="flour flour-two" /><span className="flour flour-three" />
-              <div className="counter-line" />
-            </div>
-            <div className="kitchen-copy">
-              <p className="eyebrow">Act III · Behind the glass</p>
-              <h2>The kitchen<br />keeps <em>its own time.</em></h2>
-              <div className="ingredient-note">
-                <span>04:12</span>
-                <p><strong>First fold</strong>French butter meets stone-milled flour. Then we wait.</p>
-              </div>
-            </div>
-            <div className="process-strip" aria-hidden="true">
-              <span className={progress > 0.4 ? "lit" : ""}>Fold</span>
-              <span className={progress > 0.47 ? "lit" : ""}>Rest</span>
-              <span className={progress > 0.54 ? "lit" : ""}>Shape</span>
-              <span className={progress > 0.6 ? "lit" : ""}>Bake</span>
-            </div>
-          </section>
-
-          <section className="oven-scene scene" style={{ opacity: ovenOpacity }} aria-label="The baking process">
-            <div className="oven-shell" style={{ transform: `translate(-50%, -50%) scale(${0.88 + ovenOpacity * 0.12})` }}>
-              <div className="oven-arch">
-                <div className="heat-lines" aria-hidden="true"><i /><i /><i /></div>
-                <div className="baking-cake" style={{ transform: `translateX(-50%) scaleY(${0.72 + ovenBake * 0.28})` }}>
-                  <span className="cake-top" />
-                  <span className="cake-body" />
-                </div>
-                <div className="oven-stone" />
-              </div>
-              <div className="oven-dial"><i style={{ transform: `rotate(${-42 + ovenBake * 84}deg)` }} /></div>
-            </div>
-            <div className="oven-copy">
-              <p className="eyebrow">Act IV · The rise</p>
-              <h2>Heat turns patience<br />into <em>pleasure.</em></h2>
-              <p className="temperature"><span>{Math.round(120 + ovenBake * 60)}°</span> Slow, even, golden.</p>
-            </div>
-            <div className="bake-notes">
-              <article className={ovenBake > 0.12 ? "revealed" : ""}><b>01</b><span><strong>Real time</strong>No shortcuts. No premixes.</span></article>
-              <article className={ovenBake > 0.46 ? "revealed" : ""}><b>02</b><span><strong>Real seasons</strong>Fruit when it tastes like itself.</span></article>
-              <article className={ovenBake > 0.78 ? "revealed" : ""}><b>03</b><span><strong>Real hands</strong>Every layer, every morning.</span></article>
-            </div>
-          </section>
-
-          <section className="finale-scene scene" style={{ opacity: finaleOpacity, pointerEvents: finaleOpacity > 0.7 ? "auto" : "none" }} aria-label="Welcome to Maison Miette">
-            <div className="finale-halo" aria-hidden="true" />
-            <p className="eyebrow">And now, the best part</p>
-            <h2>Come for the cake.<br /><em>Stay for the ritual.</em></h2>
-            <a className="primary-link" href="#menu">See what&apos;s warm <span>↓</span></a>
-          </section>
-
-          <div className="scroll-cue" style={{ opacity: 1 - span(progress, 0.04, 0.15) }} aria-hidden="true">
-            <span>Scroll to follow the flour</span><i />
-          </div>
-        </div>
+        {stage === 0 && <><button className="journey-primary" type="button" onClick={() => go(1)}>Enter the bakery <span aria-hidden="true">↗</span></button><div className="intro-footnote"><span className="tiny-flower" aria-hidden="true">✳</span><span><strong>Our promise</strong>Everything made slowly. Every morning.</span></div></>}
+        {stage === 1 && <><div className="welcome-note"><span aria-hidden="true">“</span><p>Bonjour, I’m Émile.<br />{" "}Let’s make something beautiful.</p><small>YOUR BAKER, SINCE 1987</small></div><button className="journey-primary" type="button" onClick={() => go(2)}>Explore the counter <span aria-hidden="true">→</span></button></>}
+        {stage === 2 && <div className="cake-selection"><div className="cake-options" role="group" aria-label="Choose your signature cake">{(Object.keys(cakes) as CakeKind[]).map((kind, i) => <button type="button" key={kind} aria-pressed={kind === order.cake} className={kind === order.cake ? "cake-option selected" : "cake-option"} onClick={() => selectCake(kind)}><span className="cake-swatch" style={{ backgroundColor: cakes[kind].color }} aria-hidden="true">{String(i + 1).padStart(2, "0")}</span><span><strong>{cakes[kind].short}</strong><small>From {money(cakes[kind].price)} · 4 servings</small></span><span className="selection-check" aria-hidden="true">{kind === order.cake ? "✓" : "↗"}</span></button>)}</div><p className="selected-ingredients">{cake.ingredients}<br />{" "}<span>Contains dairy, eggs & nuts.</span></p><button className="journey-primary" type="button" onClick={() => go(3)}>Make this cake yours <span aria-hidden="true">→</span></button></div>}
+        {stage === 3 && <div className="customizer"><div className="selected-cake-name"><span style={{ backgroundColor: cake.color }} /><strong>{cake.name}</strong><button type="button" onClick={() => go(2)}>Change</button></div><fieldset><legend>A little gathering</legend><div className="choice-row">{([4, 6, 8] as const).map(size => <button type="button" key={size} aria-pressed={order.servings === size} onClick={() => customize({ servings: size })}>{size} servings</button>)}</div></fieldset><fieldset><legend>The frosting</legend><div className="choice-row">{(Object.keys(frostingLabels) as Frosting[]).map(kind => <button type="button" key={kind} aria-pressed={order.frosting === kind} onClick={() => customize({ frosting: kind })}>{frostingLabels[kind]}</button>)}</div></fieldset><fieldset><legend>The finishing touch</legend><div className="choice-row">{(Object.keys(toppingLabels) as Topping[]).map(kind => <button type="button" key={kind} aria-pressed={order.topping === kind} onClick={() => customize({ topping: kind })}>{toppingLabels[kind]}</button>)}</div></fieldset><div className="price-line"><span>Made just for you <small>{order.servings} servings · whole cake</small></span><strong>{money(price)}</strong></div><button className="journey-primary" type="button" onClick={placeOrder}>Give Émile my order <span aria-hidden="true">→</span></button><small className="demo-note">A bakery story, with a demo order. No payment required.</small></div>}
+        {stage >= 4 && (stage !== 7 || !confirmed) && <div className="making-panel"><div className="order-ticket"><span className="ticket-mark">M</span><div><small>ÉMILE’S ORDER · NO. 001</small><strong>{cake.short}</strong><span>{order.servings} servings · {frostingLabels[order.frosting]}<br />{" "}{toppingLabels[order.topping]}</span></div><span className="ticket-price">{money(price)}</span></div><div className="making-status" aria-live="polite"><span>{currentProgress >= 1 ? stage === 7 ? "Your box is ready at the counter" : "Beautiful. On to the next little ritual." : processLabel(stage, currentProgress)}</span><span aria-hidden="true">{Math.round(currentProgress * 100)}%</span></div><progress className="making-progress" value={currentProgress} max={1} aria-label={`${chapters[stage]} progress`} /><p className="time-note">{stage === 5 ? "Our 35-minute bake, shown in 24 seconds." : stage === 7 ? "Wrapped by hand. Ready to take home." : "A little time with Émile. The story continues automatically."}</p>{stage === 4 && busy && <button type="button" className="journey-primary" onClick={() => setProgress(old => ({ ...old, [stage]: Math.min(1, (old[stage] ?? 0) + .18) }))}>{currentProgress < .6 ? "Help sprinkle the flour" : "Give it a gentle stir"} <span aria-hidden="true">✳</span></button>}{stage === 7 && currentProgress >= 1 && <button type="button" className="journey-primary" onClick={() => { setConfirmed(true); if (sound) chime(7); }}>Confirm demo order · {money(price)} <span aria-hidden="true">✓</span></button>}{!busy && stage < 7 && <button type="button" className="journey-primary" onClick={() => go(stage + 1)}>Continue the story <span aria-hidden="true">→</span></button>}{busy && <div className="playback-controls"><button type="button" aria-pressed={paused} onClick={() => setPaused(!paused)}>{paused ? "▶ Resume" : "Ⅱ Pause"}</button><button type="button" onClick={skip}>{stage === 7 ? "Finish wrapping" : "Skip this step"} <span aria-hidden="true">→</span></button></div>}</div>}
+        {confirmed && stage === 7 && <div className="completion"><div className="completion-seal" aria-hidden="true">✓</div><p><strong>{cake.name}</strong><br />{" "}{order.servings} servings · {money(price)}<br />{" "}<small>Demo order confirmed · No payment taken</small></p><button type="button" className="journey-primary" onClick={() => { setConfirmed(false); setSubmitted(false); setProgress({}); setVisited(3); go(2); }}>Create another cake <span aria-hidden="true">→</span></button><button type="button" className="text-button" onClick={restart}>Take the walk again ↗</button></div>}
       </section>
 
-      <section className="menu-section" id="menu">
-        <div className="menu-intro reveal-block">
-          <p className="eyebrow dark">Fresh from the oven · Friday, 7 August</p>
-          <h2>Today&apos;s small<br /><em>temptations.</em></h2>
-          <p>We bake in small numbers because the best things are not meant for shelves.</p>
-        </div>
-        <div className="menu-grid">
-          <article className="menu-card card-raspberry">
-            <div className="menu-image"><span>New</span></div>
-            <div className="menu-card-copy"><p><b>01</b> Seasonal</p><h3>Raspberry<br />Rose Gateau</h3><small>Almond sponge · rose cream · fresh berries</small><strong>₹ 620</strong></div>
-          </article>
-          <article className="menu-card card-cacao">
-            <div className="menu-image" />
-            <div className="menu-card-copy"><p><b>02</b> Maison classic</p><h3>Dark Cacao<br />No. 7</h3><small>70% cacao · brown butter · sea salt</small><strong>₹ 580</strong></div>
-          </article>
-          <article className="menu-card card-croissant">
-            <div className="menu-image" />
-            <div className="menu-card-copy"><p><b>03</b> Morning only</p><h3>Butter<br />Croissant</h3><small>Three-day lamination · cultured butter</small><strong>₹ 240</strong></div>
-          </article>
-        </div>
-      </section>
+      {(stage === 2 || stage === 3 || stage === 6) && <div className="inspection-tools"><button type="button" aria-label="Rotate cake left" onClick={() => world.current?.rotate(-.45)}>↶</button><span>Drag to admire every layer</span><button type="button" aria-label="Rotate cake right" onClick={() => world.current?.rotate(.45)}>↷</button></div>}
+      <div className="scene-caption" aria-hidden="true"><span>{stage === 0 ? "THE DOOR IS ALWAYS OPEN" : stage === 1 ? "A PLACE FOR THE LITTLE RITUALS" : stage === 2 ? "THREE CAKES. COUNTLESS LITTLE DETAILS." : stage === 3 ? "YOUR CAKE, TAKING SHAPE" : stage === 4 ? "THE GOODNESS IS IN THE INGREDIENTS" : stage === 5 ? "SLOW, EVEN, GOLDEN" : stage === 6 ? "FINISHED BY HAND, ALWAYS" : "A LITTLE BOX OF HAPPINESS"}</span><span>MAISON MIETTE · EST. 1987</span></div>
 
-      <section className="philosophy-section">
-        <div className="stamp" aria-hidden="true"><span>MM</span><small>Handmade daily</small></div>
-        <p className="eyebrow dark">Our promise</p>
-        <blockquote>“If it cannot be made slowly,<br />it does not belong here.”</blockquote>
-        <div className="promise-grid">
-          <span><b>01</b> Cultured butter</span><span><b>02</b> Local fruit</span><span><b>03</b> Stone-milled flour</span><span><b>04</b> Zero premixes</span>
-        </div>
-      </section>
-
-      <footer className="site-footer">
-        <div><span className="brand-mark light">M</span><h2>Save room<br /><em>for wonder.</em></h2></div>
-        <div className="footer-details"><p><small>Visit us</small>17 Rue des Lilas<br />Colaba, Mumbai</p><p><small>Hours</small>Tue–Sun · 7:30–19:00<br />Monday · We rest</p><p><small>Say bonjour</small>hello@maisonmiette.in<br />+91 22 4800 1987</p></div>
-        <div className="footer-bottom"><span>© 2026 Maison Miette</span><a href="#top">Return to the doors ↑</a></div>
-      </footer>
+      <nav className="chapter-navigation" aria-label="Story progress"><div className="chapter-current"><span>{String(stage + 1).padStart(2, "0")}<small> / 08</small></span><strong>{chapters[stage]}</strong></div><div className="chapter-steps">{chapters.map((name, i) => <button type="button" key={name} disabled={i > visited} aria-label={`${i + 1}. ${name}`} aria-pressed={i === stage} aria-current={i === stage ? "step" : undefined} onClick={() => { go(i); if (i >= 4) setPaused(true); }} className={`${i === stage ? "current" : ""} ${i < stage ? "complete" : ""}`}><span>{i < stage ? "✓" : String(i + 1).padStart(2, "0")}</span><small>{name}</small></button>)}</div><div className="chapter-back">{stage > 0 && <button type="button" onClick={() => { go(stage - 1); if (stage - 1 >= 4) setPaused(true); }} aria-label="Previous chapter">←</button>}<span>A story worth taking slowly.</span></div></nav>
+      {summary && <aside id="order-summary" className="summary-drawer" aria-label="Your cake order"><div className="drawer-heading"><p className="chapter-eyebrow">YOUR LITTLE CREATION</p><button type="button" aria-label="Close order summary" onClick={() => setSummary(false)}>×</button></div><h2>{cake.name}</h2><dl><div><dt>Gathering</dt><dd>{order.servings} servings</dd></div><div><dt>Frosting</dt><dd>{frostingLabels[order.frosting]}</dd></div><div><dt>Finishing touch</dt><dd>{toppingLabels[order.topping]}</dd></div><div><dt>Total</dt><dd>{money(price)}</dd></div></dl><p>{confirmed ? "Demo order confirmed. No payment taken." : submitted ? "Émile is making your cake." : "Your cake is waiting for your finishing touches."}</p><button type="button" className="journey-primary" onClick={() => { setSummary(false); go(3); }}>Edit my cake <span aria-hidden="true">↗</span></button><small>Contains dairy, eggs & nuts. Demo experience.</small></aside>}
     </main>
   );
 }
